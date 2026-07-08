@@ -125,7 +125,12 @@ def _build_config(args: argparse.Namespace) -> ServiceConfig:
     )
 
 
+def _reload_database_config(config: ServiceConfig) -> None:
+    config.db_config = load_database_config(config.db_config_path)
+
+
 def _validate_database(config: ServiceConfig) -> None:
+    _reload_database_config(config)
     if not config.db_config.is_complete:
         message = f"Database config is incomplete: {config.db_config_path}"
         if config.require_db:
@@ -134,6 +139,32 @@ def _validate_database(config: ServiceConfig) -> None:
         return
     LOGGER.info("Testing PostgreSQL connection from %s", config.db_config_path)
     test_database_connection(config.db_config)
+
+
+def _database_ready_for_watch(config: ServiceConfig) -> bool:
+    _reload_database_config(config)
+    if not config.db_config.is_complete:
+        if config.require_db:
+            LOGGER.error(
+                "Database config is incomplete: %s. Service stays alive and will retry.",
+                config.db_config_path,
+            )
+            return False
+        LOGGER.warning("Database config is incomplete. Using local archive fallback.")
+        return True
+
+    try:
+        test_database_connection(config.db_config)
+    except Exception as exc:
+        if config.require_db:
+            LOGGER.error(
+                "PostgreSQL is not ready: %s. Service stays alive and will retry.",
+                exc,
+            )
+            return False
+        LOGGER.warning("PostgreSQL is not ready: %s. Using local archive fallback.", exc)
+        config.db_config = DatabaseConfig()
+    return True
 
 
 def process_report(source: Path, config: ServiceConfig) -> None:
@@ -147,11 +178,18 @@ def process_report(source: Path, config: ServiceConfig) -> None:
     )
 
     if config.db_config.is_complete:
-        remote_id = save_database_archive(config.db_config, records, source.name)
-        LOGGER.info("Saved archive in PostgreSQL with id=%s", remote_id)
-    elif config.require_db:
-        raise RuntimeError(f"Database config is required but incomplete: {config.db_config_path}")
-    else:
+        try:
+            remote_id = save_database_archive(config.db_config, records, source.name)
+            LOGGER.info("Saved archive in PostgreSQL with id=%s", remote_id)
+        except Exception:
+            if config.require_db:
+                raise
+            LOGGER.exception("PostgreSQL archive save failed. Falling back to local archive.")
+            config.db_config = DatabaseConfig()
+
+    if not config.db_config.is_complete:
+        if config.require_db:
+            raise RuntimeError(f"Database config is required but incomplete: {config.db_config_path}")
         archive_name = _timestamped_name(source, ".json")
         archive_path = _unique_path(config.archive_dir, archive_name)
         save_archive_report(archive_path, records, source.name)
@@ -202,20 +240,29 @@ def run_once(config: ServiceConfig, file_path: Path | None = None) -> int:
     return failures
 
 
+def _sleep_or_stop(seconds: int) -> None:
+    for _ in range(seconds):
+        if STOP_REQUESTED:
+            break
+        time.sleep(1)
+
+
 def run_watch(config: ServiceConfig) -> int:
     _ensure_directories(config)
     LOGGER.info(
-        "Watching %s every %ss. Output: %s",
+        "Fuel Insight service started. input=%s output=%s processed=%s failed=%s db_config=%s require_db=%s poll=%ss",
         config.input_dir,
-        config.poll_interval,
         config.output_dir,
+        config.processed_dir,
+        config.failed_dir,
+        config.db_config_path,
+        config.require_db,
+        config.poll_interval,
     )
     while not STOP_REQUESTED:
-        run_once(config)
-        for _ in range(config.poll_interval):
-            if STOP_REQUESTED:
-                break
-            time.sleep(1)
+        if _database_ready_for_watch(config):
+            run_once(config)
+        _sleep_or_stop(config.poll_interval)
     LOGGER.info("Service stopped")
     return 0
 
@@ -259,9 +306,9 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, _signal_stop)
     args = parse_args(argv)
     config = _build_config(args)
-    _validate_database(config)
     if args.watch:
         return run_watch(config)
+    _validate_database(config)
     return run_once(config, args.file)
 
 

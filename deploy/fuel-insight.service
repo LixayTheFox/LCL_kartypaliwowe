@@ -12,7 +12,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/etc/fuel-insight/fuel-insight.env
 ExecStart=/opt/fuel-insight/.venv/bin/python /opt/fuel-insight/fuel_insight_service.py --watch
-Restart=on-failure
+Restart=always
 RestartSec=10
 UMask=0077
 

@@ -5,10 +5,30 @@ import unittest
 from openpyxl import Workbook
 
 from archive_database import DatabaseConfig
-from fuel_insight_service import ServiceConfig, run_once
+from fuel_insight_service import ServiceConfig, _database_ready_for_watch, run_once
 
 
 class FuelInsightServiceTests(unittest.TestCase):
+    def test_watch_database_check_does_not_exit_when_required_db_is_missing(self):
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            config = ServiceConfig(
+                input_dir=base / "inbox",
+                output_dir=base / "outbox",
+                processed_dir=base / "processed",
+                failed_dir=base / "failed",
+                archive_dir=base / "archive",
+                mapping_path=base / "kierowcy.json",
+                db_config_path=base / "missing-database.json",
+                db_config=DatabaseConfig(),
+                minimum_distance=1,
+                poll_interval=5,
+                require_db=True,
+                export_csv=True,
+            )
+
+            self.assertFalse(_database_ready_for_watch(config))
+
     def test_processes_single_report_without_database(self):
         with TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
