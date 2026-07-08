@@ -7,7 +7,7 @@ from openpyxl import Workbook
 
 from archive_database import DatabaseConfig
 from fuel_insight_service import ServiceConfig
-from fuel_insight_web import Upload, _compare_uploads, _extract_named_uploads, _extract_upload, _safe_filename
+from fuel_insight_web import Upload, _compare_uploads, _extract_named_uploads, _extract_upload, _safe_filename, _table
 
 
 def _xlsx_bytes(rows):
@@ -34,6 +34,13 @@ class FuelInsightWebTests(unittest.TestCase):
     def test_safe_filename_rejects_non_xlsx(self):
         with self.assertRaises(ValueError):
             _safe_filename("report.csv")
+
+    def test_table_has_column_filters_and_sort_buttons(self):
+        markup = _table(["Kierowca", "Spalanie"], ["<tr><td>Jan</td><td>12,3</td></tr>"])
+
+        self.assertIn("interactive-table", markup)
+        self.assertEqual(markup.count("column-filter"), 2)
+        self.assertEqual(markup.count("sort-button"), 2)
 
     def test_extract_upload_reads_multipart_file(self):
         boundary = "----fuel-insight-test"

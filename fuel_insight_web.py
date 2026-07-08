@@ -765,10 +765,29 @@ def _transactions_table(records: list[FuelRecord], result: AnalysisResult) -> st
 
 
 def _table(headers: list[str], rows: list[str], css_class: str = "") -> str:
-    header_html = "".join(f"<th>{html.escape(header)}</th>" for header in headers)
+    header_cells = []
+    filter_cells = []
+    for index, header in enumerate(headers):
+        escaped_header = html.escape(header)
+        escaped_label = html.escape(header, quote=True) or f"Kolumna {index + 1}"
+        header_cells.append(
+            "<th>"
+            f'<button type="button" class="sort-button" data-column="{index}" aria-label="Sortuj: {escaped_label}">'
+            f"<span>{escaped_header}</span>"
+            '<span class="sort-marker" aria-hidden="true"></span>'
+            "</button>"
+            "</th>"
+        )
+        filter_cells.append(
+            "<th>"
+            f'<input type="search" class="column-filter" data-column="{index}" '
+            f'aria-label="Filtr: {escaped_label}" autocomplete="off">'
+            "</th>"
+        )
+    table_class = " ".join(part for part in (css_class, "interactive-table") if part)
     return (
-        f'<div class="table-scroll"><table class="{css_class}">'
-        f"<thead><tr>{header_html}</tr></thead>"
+        f'<div class="table-scroll"><table class="{html.escape(table_class, quote=True)}">'
+        f"<thead><tr>{''.join(header_cells)}</tr><tr class=\"filter-row\">{''.join(filter_cells)}</tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table></div>"
     )
@@ -889,6 +908,9 @@ def _render_page(title: str, active: str, query: dict[str, list[str]], body: str
     input[type="file"] {{ width: 100%; border: 1px dashed var(--line); border-radius: 6px; padding: 14px; background: #fbfcfe; }}
     button, .button, .small-button {{ appearance: none; border: 0; border-radius: 6px; background: var(--blue); color: #fff; cursor: pointer; display: inline-block; font: inherit; padding: 10px 14px; text-decoration: none; }}
     button:hover, .button:hover, .small-button:hover {{ background: var(--blue-dark); }}
+    .sort-button {{ appearance: none; border: 0; border-radius: 0; background: transparent; color: inherit; cursor: pointer; display: flex; align-items: center; gap: 6px; justify-content: space-between; width: 100%; padding: 0; text-align: left; text-transform: inherit; font: inherit; }}
+    .sort-button:hover {{ background: transparent; color: inherit; text-decoration: underline; }}
+    .sort-marker {{ color: #cbd5e1; font-size: 11px; min-width: 22px; text-align: right; text-transform: none; }}
     .button.secondary {{ background: #334155; }}
     .small, .small-button {{ padding: 7px 10px; font-size: 13px; }}
     .report-head {{ display: flex; justify-content: space-between; gap: 14px; align-items: start; }}
@@ -906,6 +928,9 @@ def _render_page(title: str, active: str, query: dict[str, list[str]], body: str
     table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
     th, td {{ border-bottom: 1px solid var(--line); padding: 9px 8px; text-align: left; vertical-align: top; white-space: nowrap; }}
     th {{ position: sticky; top: 0; z-index: 1; background: var(--navy); color: #fff; font-size: 12px; text-transform: uppercase; }}
+    thead tr:first-child th {{ z-index: 3; }}
+    .filter-row th {{ top: 36px; z-index: 2; background: #eef3f9; color: var(--text); padding: 6px; }}
+    .column-filter {{ box-sizing: border-box; width: 100%; min-width: 92px; border: 1px solid var(--line); border-radius: 4px; padding: 6px 7px; background: #fff; color: var(--text); font: inherit; font-size: 12px; }}
     tbody tr:nth-child(even) {{ background: #f8fafc; }}
     tr.worst {{ background: #fdecec !important; color: var(--red); font-weight: 700; }}
     tr.unranked {{ color: #7b8794; }}
@@ -932,6 +957,98 @@ def _render_page(title: str, active: str, query: dict[str, list[str]], body: str
     {_message_box(query)}
     {body}
   </main>
+  <script>
+    (() => {{
+      function cellText(row, index) {{
+        const cell = row.cells[index];
+        return cell ? cell.textContent.trim() : "";
+      }}
+
+      function numberValue(text) {{
+        const normalized = text
+          .replace(/\\s/g, "")
+          .replace(",", ".")
+          .replace(/[^0-9.+-]/g, "");
+        if (!normalized || normalized === "-" || normalized === "+") {{
+          return NaN;
+        }}
+        return Number(normalized);
+      }}
+
+      function applyFilters(table) {{
+        const filters = Array.from(table.querySelectorAll(".column-filter"));
+        const body = table.tBodies[0];
+        if (!body) {{
+          return;
+        }}
+        Array.from(body.rows).forEach((row) => {{
+          const visible = filters.every((input) => {{
+            const value = input.value.trim().toLowerCase();
+            if (!value) {{
+              return true;
+            }}
+            return cellText(row, Number(input.dataset.column)).toLowerCase().includes(value);
+          }});
+          row.hidden = !visible;
+        }});
+      }}
+
+      function compareText(left, right) {{
+        return left.localeCompare(right, "pl", {{ numeric: true, sensitivity: "base" }});
+      }}
+
+      document.querySelectorAll(".interactive-table").forEach((table) => {{
+        const body = table.tBodies[0];
+        if (!body) {{
+          return;
+        }}
+
+        table.querySelectorAll(".column-filter").forEach((input) => {{
+          input.addEventListener("input", () => applyFilters(table));
+        }});
+
+        table.querySelectorAll(".sort-button").forEach((button) => {{
+          button.addEventListener("click", () => {{
+            const column = Number(button.dataset.column);
+            const currentColumn = table.dataset.sortColumn;
+            const nextDirection = currentColumn === String(column) && table.dataset.sortDirection === "asc" ? "desc" : "asc";
+            table.dataset.sortColumn = String(column);
+            table.dataset.sortDirection = nextDirection;
+
+            const rows = Array.from(body.rows);
+            rows.sort((leftRow, rightRow) => {{
+              const leftText = cellText(leftRow, column);
+              const rightText = cellText(rightRow, column);
+              const leftNumber = numberValue(leftText);
+              const rightNumber = numberValue(rightText);
+              let order;
+              if (!Number.isNaN(leftNumber) && !Number.isNaN(rightNumber)) {{
+                order = leftNumber - rightNumber;
+              }} else {{
+                order = compareText(leftText, rightText);
+              }}
+              return nextDirection === "asc" ? order : -order;
+            }});
+
+            rows.forEach((row) => body.appendChild(row));
+            table.querySelectorAll(".sort-button").forEach((other) => {{
+              other.removeAttribute("aria-sort");
+              const marker = other.querySelector(".sort-marker");
+              if (marker) {{
+                marker.textContent = "";
+              }}
+            }});
+            button.setAttribute("aria-sort", nextDirection === "asc" ? "ascending" : "descending");
+            const marker = button.querySelector(".sort-marker");
+            if (marker) {{
+              marker.textContent = nextDirection === "asc" ? "A-Z" : "Z-A";
+            }}
+            applyFilters(table);
+          }});
+        }});
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """
