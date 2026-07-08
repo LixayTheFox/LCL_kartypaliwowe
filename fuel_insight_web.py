@@ -73,6 +73,15 @@ class ReportView:
 
 
 @dataclass(slots=True)
+class ComparisonView:
+    left_label: str
+    right_label: str
+    left_result: AnalysisResult
+    right_result: AnalysisResult
+    generated_at: datetime
+
+
+@dataclass(slots=True)
 class ArchiveOption:
     key: str
     label: str
@@ -86,6 +95,7 @@ class WebState:
     started_at: datetime
     max_upload_bytes: int
     current_report: ReportView | None = None
+    current_comparison: ComparisonView | None = None
 
 
 class FuelInsightServer(ThreadingHTTPServer):
@@ -106,11 +116,23 @@ class FuelInsightHandler(BaseHTTPRequestHandler):
         if parsed.path == "/":
             self._send_html(_render_index(self.server.state, query))
             return
+        if parsed.path == "/compare":
+            self._send_html(_render_compare_page(self.server.state, query))
+            return
+        if parsed.path == "/inbox":
+            self._send_html(_render_inbox_page(self.server.state, query))
+            return
+        if parsed.path == "/exports":
+            self._send_html(_render_exports_page(self.server.state, query))
+            return
         if parsed.path == "/health":
             self._send_bytes(b'{"status":"ok"}\n', "application/json; charset=utf-8")
             return
         if parsed.path == "/archive":
-            self._handle_archive(query)
+            if query.get("key"):
+                self._handle_archive(query)
+            else:
+                self._send_html(_render_archive_page(self.server.state, query))
             return
         if parsed.path == "/export":
             self._handle_export(query)
@@ -128,6 +150,9 @@ class FuelInsightHandler(BaseHTTPRequestHandler):
         if parsed.path == "/analyze-inbox":
             self._handle_analyze_inbox()
             return
+        if parsed.path == "/compare":
+            self._handle_compare()
+            return
         self.send_error(404, "Nie znaleziono strony")
 
     def log_message(self, fmt: str, *args) -> None:
@@ -143,12 +168,18 @@ class FuelInsightHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _redirect(self, message: str = "", kind: str = "ok", anchor: str = "raport") -> None:
+    def _redirect(
+        self,
+        message: str = "",
+        kind: str = "ok",
+        anchor: str = "raport",
+        path: str = "/",
+    ) -> None:
         params = {}
         if message:
             params["message"] = message
             params["kind"] = kind
-        location = "/"
+        location = path
         if params:
             location += "?" + urlencode(params)
         if anchor:
@@ -194,8 +225,34 @@ class FuelInsightHandler(BaseHTTPRequestHandler):
             self._redirect("Plik z inbox zostal wczytany do raportu.")
         except Exception as exc:
             LOGGER.exception("Inbox analysis failed: %s", exc)
-            self._redirect(str(exc), "error", anchor="inbox")
+            self._redirect(str(exc), "error", anchor="inbox", path="/inbox")
 
+    def _handle_compare(self) -> None:
+        state = self.server.state
+        try:
+            length = _content_length(self.headers.get("Content-Length"))
+            if length <= 0:
+                raise ValueError("Wybierz dwa pliki XLSX do porownania.")
+            if length > state.max_upload_bytes * 2:
+                limit_mb = max(1, (state.max_upload_bytes * 2) // (1024 * 1024))
+                raise ValueError(f"Pliki sa za duze. Limit laczny: {limit_mb} MB.")
+
+            body = self.rfile.read(length)
+            uploads = _extract_named_uploads(
+                body,
+                self.headers.get("Content-Type", ""),
+                ("left_report", "right_report"),
+            )
+            with state.lock:
+                state.current_comparison = _compare_uploads(
+                    uploads["left_report"],
+                    uploads["right_report"],
+                    state.config,
+                )
+            self._redirect("Porownanie zostalo przygotowane.", path="/compare", anchor="wynik")
+        except Exception as exc:
+            LOGGER.exception("Compare failed: %s", exc)
+            self._redirect(str(exc), "error", anchor="compare", path="/compare")
     def _handle_archive(self, query: dict[str, list[str]]) -> None:
         state = self.server.state
         key = (query.get("key") or [""])[0]
@@ -303,6 +360,43 @@ def _extract_upload(body: bytes, content_type: str) -> Upload:
     raise ValueError("Nie znaleziono pola pliku 'report'.")
 
 
+
+def _extract_named_uploads(
+    body: bytes,
+    content_type: str,
+    field_names: tuple[str, ...],
+) -> dict[str, Upload]:
+    if "multipart/form-data" not in content_type:
+        raise ValueError("Formularz musi wyslac pliki jako multipart/form-data.")
+    header = (
+        f"Content-Type: {content_type}\r\n"
+        "MIME-Version: 1.0\r\n"
+        "\r\n"
+    ).encode("utf-8", "replace")
+    message = BytesParser(policy=policy.default).parsebytes(header + body)
+    if not message.is_multipart():
+        raise ValueError("Nie udalo sie odczytac formularza uploadu.")
+
+    expected = set(field_names)
+    uploads: dict[str, Upload] = {}
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        field_name = part.get_param("name", header="content-disposition")
+        if field_name not in expected:
+            continue
+        filename = part.get_filename()
+        content = part.get_payload(decode=True) or b""
+        if not filename:
+            raise ValueError("Brakuje nazwy jednego z plikow.")
+        if not content:
+            raise ValueError(f"Plik {filename} jest pusty.")
+        uploads[str(field_name)] = Upload(filename=filename, content=content)
+
+    missing = [name for name in field_names if name not in uploads]
+    if missing:
+        raise ValueError("Wybierz oba pliki XLSX do porownania.")
+    return uploads
 def _read_form(handler: BaseHTTPRequestHandler) -> dict[str, list[str]]:
     length = _content_length(handler.headers.get("Content-Length"))
     body = handler.rfile.read(length).decode("utf-8", "replace") if length else ""
@@ -406,6 +500,58 @@ def _analyze_file(source_path: Path, config: ServiceConfig) -> ReportView:
     )
 
 
+
+def _analyze_uploaded_for_compare(upload: Upload, config: ServiceConfig) -> tuple[str, AnalysisResult]:
+    filename = _safe_filename(upload.filename)
+    compare_dir = config.input_dir / "_compare"
+    compare_dir.mkdir(parents=True, exist_ok=True)
+    source_path = _unique_path(compare_dir, filename)
+    source_path.write_bytes(upload.content)
+    try:
+        records = load_single_report(source_path)
+    finally:
+        source_path.unlink(missing_ok=True)
+    result = analyze_records(
+        records,
+        driver_overrides=load_driver_mapping(config.mapping_path),
+        minimum_distance=config.minimum_distance,
+    )
+    return filename, result
+
+
+def _compare_uploads(left: Upload, right: Upload, config: ServiceConfig) -> ComparisonView:
+    left_label, left_result = _analyze_uploaded_for_compare(left, config)
+    right_label, right_result = _analyze_uploaded_for_compare(right, config)
+    return ComparisonView(
+        left_label=left_label,
+        right_label=right_label,
+        left_result=left_result,
+        right_result=right_result,
+        generated_at=datetime.now(),
+    )
+
+
+def _comparison_key(row) -> str:
+    if row.vehicles:
+        return "|".join(row.vehicles)
+    return row.driver.casefold()
+
+
+def _comparison_label(key: str, left_row, right_row) -> str:
+    row = left_row or right_row
+    if row is None:
+        return key.replace("|", ", ")
+    return f"{row.driver} / {row.vehicle_label}"
+
+
+def _delta(current: float | int | None, previous: float | int | None) -> float:
+    return float(current or 0) - float(previous or 0)
+
+
+def _format_delta(value: float | int | None, decimals: int = 2) -> str:
+    number = float(value or 0)
+    sign = "+" if number > 0 else ""
+    return sign + _format_number(number, decimals)
 def _archive_label(entry: ArchivedReportInfo) -> str:
     imported = entry.imported_at.strftime("%d.%m.%Y %H:%M") if entry.imported_at else "bez daty"
     period = _period_label(entry.date_from, entry.date_to)
@@ -683,28 +829,28 @@ def _render_outputs(config: ServiceConfig) -> str:
     return _table(["Plik", "Rozmiar", "Data", ""], rows)
 
 
-def _render_index(state: WebState, query: dict[str, list[str]]) -> str:
-    config = state.config
-    with state.lock:
-        current_report = state.current_report
-    started = state.started_at.strftime("%Y-%m-%d %H:%M:%S")
-    db_summary = _database_summary(config)
-    status_cards = "".join(
-        f"<div><strong>{html.escape(label)}</strong><span>{html.escape(value)}</span></div>"
-        for label, value in (
-            ("Start", started),
-            ("Baza/archiwum", db_summary),
-            ("Inbox", str(config.input_dir)),
-            ("Archiwum", str(config.archive_dir)),
-            ("Eksporty", str(config.output_dir)),
-        )
-    )
+def _nav(active: str) -> str:
+    items = [
+        ("report", "/", "Raport"),
+        ("compare", "/compare", "Porownanie"),
+        ("archive", "/archive", "Archiwum"),
+        ("inbox", "/inbox", "Inbox"),
+        ("exports", "/exports", "Eksporty"),
+    ]
+    links = []
+    for key, href, label in items:
+        css = ' class="active"' if key == active else ""
+        links.append(f'<a{css} href="{href}">{html.escape(label)}</a>')
+    return "".join(links)
+
+
+def _render_page(title: str, active: str, query: dict[str, list[str]], body: str) -> str:
     return f"""<!doctype html>
 <html lang="pl">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Fuel Insight</title>
+  <title>Fuel Insight - {html.escape(title)}</title>
   <style>
     :root {{
       color-scheme: light;
@@ -728,6 +874,7 @@ def _render_index(state: WebState, query: dict[str, list[str]]) -> str:
     header p {{ margin: 5px 0 0; color: #b9c4d6; }}
     nav {{ display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }}
     nav a {{ color: #fff; text-decoration: none; border: 1px solid rgba(255,255,255,.25); border-radius: 6px; padding: 7px 10px; }}
+    nav a.active {{ background: #fff; color: var(--navy); border-color: #fff; }}
     main {{ max-width: 1480px; margin: 0 auto; padding: 18px clamp(12px, 3vw, 24px) 48px; }}
     section {{ background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 16px; }}
     h2 {{ margin: 0 0 12px; font-size: 18px; letter-spacing: 0; }}
@@ -735,12 +882,10 @@ def _render_index(state: WebState, query: dict[str, list[str]]) -> str:
     .notice {{ border: 1px solid #b8e2c8; border-left: 4px solid var(--green); background: #f0fbf4; border-radius: 6px; padding: 12px 14px; margin-bottom: 16px; }}
     .notice.warn {{ border-color: #f1d18a; border-left-color: var(--amber); background: #fff8e8; }}
     .notice.error {{ border-color: #f1b8b2; border-left-color: var(--red); background: #fff1f0; }}
-    .top-grid {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(330px, .55fr); gap: 16px; align-items: start; }}
-    .status {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-top: 10px; }}
-    .status div {{ border: 1px solid var(--line); border-radius: 6px; padding: 10px; min-width: 0; }}
-    .status strong {{ display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; margin-bottom: 4px; }}
-    .status span {{ display: block; overflow-wrap: anywhere; font-size: 14px; }}
     .upload {{ display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; }}
+    .file-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }}
+    .file-field {{ display: grid; gap: 6px; }}
+    .file-field label {{ color: var(--muted); font-size: 13px; font-weight: 700; }}
     input[type="file"] {{ width: 100%; border: 1px dashed var(--line); border-radius: 6px; padding: 14px; background: #fbfcfe; }}
     button, .button, .small-button {{ appearance: none; border: 0; border-radius: 6px; background: var(--blue); color: #fff; cursor: pointer; display: inline-block; font: inherit; padding: 10px 14px; text-decoration: none; }}
     button:hover, .button:hover, .small-button:hover {{ background: var(--blue-dark); }}
@@ -757,7 +902,7 @@ def _render_index(state: WebState, query: dict[str, list[str]]) -> str:
     .kpi.amber {{ border-left-color: var(--amber); }}
     .kpi.violet {{ border-left-color: var(--violet); }}
     .warnings {{ margin: 0 0 16px; border: 1px solid #f1d18a; border-radius: 8px; background: #fff8e8; padding: 12px 18px 12px 34px; color: #7a4b00; }}
-    .table-scroll {{ overflow: auto; max-height: 620px; border: 1px solid var(--line); border-radius: 6px; }}
+    .table-scroll {{ overflow: auto; max-height: 680px; border: 1px solid var(--line); border-radius: 6px; }}
     table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
     th, td {{ border-bottom: 1px solid var(--line); padding: 9px 8px; text-align: left; vertical-align: top; white-space: nowrap; }}
     th {{ position: sticky; top: 0; z-index: 1; background: var(--navy); color: #fff; font-size: 12px; text-transform: uppercase; }}
@@ -770,9 +915,8 @@ def _render_index(state: WebState, query: dict[str, list[str]]) -> str:
     .archive-list a:hover {{ border-color: var(--blue); }}
     .empty, .empty-report p {{ color: var(--muted); }}
     @media (max-width: 980px) {{
-      .top-grid {{ grid-template-columns: 1fr; }}
       .kpi-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-      .upload {{ grid-template-columns: 1fr; }}
+      .upload, .file-grid {{ grid-template-columns: 1fr; }}
       .report-head {{ display: block; }}
       .actions {{ justify-content: flex-start; margin-top: 10px; }}
     }}
@@ -782,48 +926,157 @@ def _render_index(state: WebState, query: dict[str, list[str]]) -> str:
   <header>
     <h1>Fuel Insight</h1>
     <p>Raport efektywnosci kierowcow i pojazdow</p>
-    <nav>
-      <a href="#upload">Raport</a>
-      <a href="#raport">Ranking</a>
-      <a href="#archiwum">Archiwum</a>
-      <a href="#eksporty">Eksporty</a>
-    </nav>
+    <nav>{_nav(active)}</nav>
   </header>
   <main>
     {_message_box(query)}
-    <div class="top-grid">
-      <div>
-        <section id="upload">
-          <h2>Wczytaj raport XLSX</h2>
-          <form class="upload" action="/upload" method="post" enctype="multipart/form-data">
-            <input type="file" name="report" accept=".xlsx" required>
-            <button type="submit">Analizuj raport</button>
-          </form>
-          <div class="status">{status_cards}</div>
-        </section>
-        {_render_report(current_report)}
-      </div>
-      <aside>
-        <section id="archiwum">
-          <h2>Archiwum</h2>
-          {_render_archive(config)}
-        </section>
-        <section id="inbox">
-          <h2>Pliki w inbox</h2>
-          {_render_inbox(config)}
-        </section>
-        <section id="eksporty">
-          <h2>Eksporty</h2>
-          {_render_outputs(config)}
-        </section>
-      </aside>
-    </div>
+    {body}
   </main>
 </body>
 </html>
 """
 
 
+def _render_index(state: WebState, query: dict[str, list[str]]) -> str:
+    with state.lock:
+        current_report = state.current_report
+    body = f"""
+    <section id="upload">
+      <h2>Wczytaj raport XLSX</h2>
+      <form class="upload" action="/upload" method="post" enctype="multipart/form-data">
+        <input type="file" name="report" accept=".xlsx" required>
+        <button type="submit">Analizuj raport</button>
+      </form>
+    </section>
+    {_render_report(current_report)}
+    """
+    return _render_page("Raport", "report", query, body)
+
+
+def _render_archive_page(state: WebState, query: dict[str, list[str]]) -> str:
+    body = f"""
+    <section id="archiwum">
+      <h2>Archiwum</h2>
+      {_render_archive(state.config)}
+    </section>
+    """
+    return _render_page("Archiwum", "archive", query, body)
+
+
+def _render_inbox_page(state: WebState, query: dict[str, list[str]]) -> str:
+    body = f"""
+    <section id="inbox">
+      <h2>Pliki w inbox</h2>
+      {_render_inbox(state.config)}
+    </section>
+    """
+    return _render_page("Inbox", "inbox", query, body)
+
+
+def _render_exports_page(state: WebState, query: dict[str, list[str]]) -> str:
+    body = f"""
+    <section id="eksporty">
+      <h2>Eksporty</h2>
+      {_render_outputs(state.config)}
+    </section>
+    """
+    return _render_page("Eksporty", "exports", query, body)
+
+
+def _render_compare_page(state: WebState, query: dict[str, list[str]]) -> str:
+    with state.lock:
+        comparison = state.current_comparison
+    body = f"""
+    <section id="compare">
+      <h2>Porownaj dwa raporty XLSX</h2>
+      <form action="/compare" method="post" enctype="multipart/form-data">
+        <div class="file-grid">
+          <div class="file-field">
+            <label>Raport bazowy</label>
+            <input type="file" name="left_report" accept=".xlsx" required>
+          </div>
+          <div class="file-field">
+            <label>Raport porownywany</label>
+            <input type="file" name="right_report" accept=".xlsx" required>
+          </div>
+        </div>
+        <p style="margin-top: 12px;"><button type="submit">Porownaj pliki</button></p>
+      </form>
+    </section>
+    {_render_comparison(comparison)}
+    """
+    return _render_page("Porownanie", "compare", query, body)
+
+
+def _render_comparison(view: ComparisonView | None) -> str:
+    if view is None:
+        return '<section id="wynik" class="empty-report"><h2>Wynik porownania</h2><p>Wybierz dwa pliki XLSX, zeby zobaczyc roznice w paliwie, dystansie, spalaniu i transakcjach.</p></section>'
+
+    left = view.left_result
+    right = view.right_result
+    left_avg = left.average_consumption or 0
+    right_avg = right.average_consumption or 0
+    cards = f"""
+    <section id="wynik" class="report-head">
+      <div>
+        <h2>{html.escape(view.left_label)} -> {html.escape(view.right_label)}</h2>
+        <p>Wygenerowano: {html.escape(view.generated_at.strftime('%Y-%m-%d %H:%M:%S'))}</p>
+      </div>
+    </section>
+    <section class="kpi-grid">
+      {_kpi('Paliwo roznica', f"{_format_delta(_delta(right.total_fuel, left.total_fuel))} l", 'green')}
+      {_kpi('Dystans roznica', f"{_format_delta(_delta(right.total_distance, left.total_distance), 1)} km", 'violet')}
+      {_kpi('Spalanie roznica', f"{_format_delta(_delta(right_avg, left_avg))} l/100 km", 'amber')}
+      {_kpi('Transakcje roznica', _format_delta(_delta(len(right.records), len(left.records)), 0), 'blue')}
+      {_kpi('Pozycji w rankingu', f"{left.ranked_count} -> {right.ranked_count}", 'red')}
+    </section>
+    """
+    left_rows = {_comparison_key(row): row for row in left.rows}
+    right_rows = {_comparison_key(row): row for row in right.rows}
+    keys = sorted(
+        set(left_rows) | set(right_rows),
+        key=lambda key: abs(_delta(getattr(right_rows.get(key), 'fuel_total', 0), getattr(left_rows.get(key), 'fuel_total', 0))),
+        reverse=True,
+    )
+    rows = []
+    for key in keys:
+        left_row = left_rows.get(key)
+        right_row = right_rows.get(key)
+        left_consumption = left_row.consumption if left_row and left_row.consumption is not None else 0
+        right_consumption = right_row.consumption if right_row and right_row.consumption is not None else 0
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(_comparison_label(key, left_row, right_row))}</td>"
+            f"<td>{_format_number(getattr(left_row, 'fuel_total', 0))}</td>"
+            f"<td>{_format_number(getattr(right_row, 'fuel_total', 0))}</td>"
+            f"<td>{_format_delta(_delta(getattr(right_row, 'fuel_total', 0), getattr(left_row, 'fuel_total', 0)))}</td>"
+            f"<td>{_format_number(getattr(left_row, 'distance_km', 0), 1)}</td>"
+            f"<td>{_format_number(getattr(right_row, 'distance_km', 0), 1)}</td>"
+            f"<td>{_format_delta(_delta(getattr(right_row, 'distance_km', 0), getattr(left_row, 'distance_km', 0)), 1)}</td>"
+            f"<td>{_format_number(left_consumption)}</td>"
+            f"<td>{_format_number(right_consumption)}</td>"
+            f"<td>{_format_delta(_delta(right_consumption, left_consumption))}</td>"
+            f"<td>{int(getattr(left_row, 'transactions', 0))}</td>"
+            f"<td>{int(getattr(right_row, 'transactions', 0))}</td>"
+            f"<td>{_format_delta(_delta(getattr(right_row, 'transactions', 0), getattr(left_row, 'transactions', 0)), 0)}</td>"
+            "</tr>"
+        )
+    headers = [
+        "Kierowca / pojazd",
+        "Paliwo A",
+        "Paliwo B",
+        "Delta paliwa",
+        "Dystans A",
+        "Dystans B",
+        "Delta dystansu",
+        "Spalanie A",
+        "Spalanie B",
+        "Delta spalania",
+        "Trans. A",
+        "Trans. B",
+        "Delta trans.",
+    ]
+    return cards + f"<section><h2>Roznice per pozycja</h2>{_table(headers, rows, 'wide-table')}</section>"
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fuel Insight web report UI")
     parser.add_argument("--host", default=WEB_HOST)
