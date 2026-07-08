@@ -28,7 +28,6 @@ Najważniejsze zmienne:
 | `FUEL_INSIGHT_LOG_LEVEL` | poziom logowania | `INFO` |
 | `FUEL_INSIGHT_WEB_HOST` | adres nasluchu panelu WWW | `0.0.0.0` |
 | `FUEL_INSIGHT_WEB_PORT` | port panelu WWW | `8000` |
-| `FUEL_INSIGHT_WEB_WATCH_INPUT` | przetwarza pliki wrzucone do inboxa w tle | `1` |
 | `FUEL_INSIGHT_WEB_MAX_UPLOAD_MB` | limit uploadu XLSX w panelu | `100` |
 | `FUEL_INSIGHT_DATA_DIR` | bazowy katalog danych | `/var/lib/fuel-insight` |
 | `FUEL_INSIGHT_INPUT_DIR` | katalog wejściowy dla XLSX | `/var/lib/fuel-insight/inbox` |
@@ -121,7 +120,7 @@ sudo cp raport.xlsx /var/lib/fuel-insight/inbox/
 sudo chown fuel-insight:fuel-insight /var/lib/fuel-insight/inbox/raport.xlsx
 ```
 
-Usługa zapisze raporty do `/var/lib/fuel-insight/outbox`, a plik źródłowy przeniesie do `/var/lib/fuel-insight/processed`. Przy błędzie plik trafi do `/var/lib/fuel-insight/failed` razem z plikiem `.error.txt`.
+Panel zapisuje archiwa do PostgreSQL albo lokalnego katalogu `/var/lib/fuel-insight/archiwum`. Eksporty XLSX/CSV trafiaja do `/var/lib/fuel-insight/outbox`.
 
 ## Reczne uruchomienie panelu WWW
 
@@ -133,7 +132,7 @@ FUEL_INSIGHT_LOG_FILE=/var/log/fuel-insight/app.log \
 /opt/fuel-insight/.venv/bin/python /opt/fuel-insight/fuel_insight_web.py --host 0.0.0.0 --port 8000
 ```
 
-Panel przyjmuje upload XLSX, zapisuje wynik w outbox i pozwala pobrac gotowe raporty. Domyslnie nadal pilnuje katalogu inbox w tle, tak jak poprzedni watcher.
+Panel przyjmuje upload XLSX, od razu pokazuje KPI, ranking, transakcje i archiwum. Eksport XLSX/CSV zapisuje pliki w outbox i pozwala je pobrac z panelu.
 
 ## Ręczne uruchomienie trybu headless
 
