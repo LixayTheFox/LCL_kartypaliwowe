@@ -1,0 +1,33 @@
+[Unit]
+Description=Fuel Insight XLSX processor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=fuel-insight
+Group=fuel-insight
+WorkingDirectory=/opt/fuel-insight
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/etc/fuel-insight/fuel-insight.env
+ExecStart=/opt/fuel-insight/.venv/bin/python /opt/fuel-insight/fuel_insight_service.py --watch
+Restart=on-failure
+RestartSec=10
+UMask=0077
+
+StateDirectory=fuel-insight
+LogsDirectory=fuel-insight
+ConfigurationDirectory=fuel-insight
+ReadWritePaths=/var/lib/fuel-insight /var/log/fuel-insight
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

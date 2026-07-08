@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.log
+.env
+*.env
+.verification/
+node_modules/
+build/
+dist/
+wydanie/
+*.spec
+config/database.json
+config/*.local.json
