@@ -2,10 +2,11 @@
 
 Aplikacja do analizy raportów paliwowych XLSX, tworzenia rankingu kierowców lub pojazdów oraz archiwizacji raportów lokalnie albo w PostgreSQL.
 
-Repo jest przygotowane pod dwa tryby:
+Repo jest przygotowane pod trzy tryby:
 
 - desktop GUI na Windows: `app.py`,
-- headless service na Debianie/VM: `fuel_insight_service.py` uruchamiany przez `systemd`.
+- web UI na Debianie/VM: `fuel_insight_web.py` uruchamiany przez `systemd`,
+- headless service na Debianie/VM: `fuel_insight_service.py` do recznego przetwarzania lub jako alternatywa.
 
 ## Jak działa analiza
 
@@ -25,6 +26,10 @@ Najważniejsze zmienne:
 | `FUEL_INSIGHT_DB_CONFIG` | plik JSON z połączeniem PostgreSQL | `/etc/fuel-insight/database.json` |
 | `FUEL_INSIGHT_LOG_FILE` | plik logów aplikacji | `/var/log/fuel-insight/app.log` |
 | `FUEL_INSIGHT_LOG_LEVEL` | poziom logowania | `INFO` |
+| `FUEL_INSIGHT_WEB_HOST` | adres nasluchu panelu WWW | `0.0.0.0` |
+| `FUEL_INSIGHT_WEB_PORT` | port panelu WWW | `8000` |
+| `FUEL_INSIGHT_WEB_WATCH_INPUT` | przetwarza pliki wrzucone do inboxa w tle | `1` |
+| `FUEL_INSIGHT_WEB_MAX_UPLOAD_MB` | limit uploadu XLSX w panelu | `100` |
 | `FUEL_INSIGHT_DATA_DIR` | bazowy katalog danych | `/var/lib/fuel-insight` |
 | `FUEL_INSIGHT_INPUT_DIR` | katalog wejściowy dla XLSX | `/var/lib/fuel-insight/inbox` |
 | `FUEL_INSIGHT_OUTPUT_DIR` | katalog raportów wynikowych | `/var/lib/fuel-insight/outbox` |
@@ -89,6 +94,19 @@ sudo systemctl enable --now fuel-insight
 sudo systemctl status fuel-insight
 ```
 
+Panel WWW bedzie dostepny pod adresem:
+
+```text
+http://<IP_VM>:8000
+```
+
+Jesli nie widzisz strony z innego komputera, sprawdz nasluch i firewall:
+
+```bash
+sudo ss -ltnp | grep 8000
+sudo ufw allow 8000/tcp
+```
+
 Logi:
 
 ```bash
@@ -104,6 +122,18 @@ sudo chown fuel-insight:fuel-insight /var/lib/fuel-insight/inbox/raport.xlsx
 ```
 
 Usługa zapisze raporty do `/var/lib/fuel-insight/outbox`, a plik źródłowy przeniesie do `/var/lib/fuel-insight/processed`. Przy błędzie plik trafi do `/var/lib/fuel-insight/failed` razem z plikiem `.error.txt`.
+
+## Reczne uruchomienie panelu WWW
+
+Lokalny test panelu bez systemd:
+
+```bash
+FUEL_INSIGHT_DB_CONFIG=/etc/fuel-insight/database.json \
+FUEL_INSIGHT_LOG_FILE=/var/log/fuel-insight/app.log \
+/opt/fuel-insight/.venv/bin/python /opt/fuel-insight/fuel_insight_web.py --host 0.0.0.0 --port 8000
+```
+
+Panel przyjmuje upload XLSX, zapisuje wynik w outbox i pozwala pobrac gotowe raporty. Domyslnie nadal pilnuje katalogu inbox w tle, tak jak poprzedni watcher.
 
 ## Ręczne uruchomienie trybu headless
 
@@ -121,7 +151,7 @@ Przetworzenie pojedynczego pliku:
 /opt/fuel-insight/.venv/bin/python /opt/fuel-insight/fuel_insight_service.py --file /path/to/raport.xlsx
 ```
 
-Tryb ciągły, taki jak w `systemd`:
+Alternatywny tryb ciagly bez panelu WWW:
 
 ```bash
 /opt/fuel-insight/.venv/bin/python /opt/fuel-insight/fuel_insight_service.py --watch

@@ -1,5 +1,5 @@
 [Unit]
-Description=Fuel Insight XLSX processor
+Description=Fuel Insight web UI and XLSX processor
 Wants=network-online.target
 After=network-online.target
 
@@ -11,7 +11,7 @@ WorkingDirectory=/opt/fuel-insight
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 EnvironmentFile=/etc/fuel-insight/fuel-insight.env
-ExecStart=/opt/fuel-insight/.venv/bin/python /opt/fuel-insight/fuel_insight_service.py --watch
+ExecStart=/opt/fuel-insight/.venv/bin/python /opt/fuel-insight/fuel_insight_web.py
 Restart=always
 RestartSec=10
 UMask=0077

@@ -69,6 +69,12 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+WEB_HOST = os.getenv(f"{APP_ENV_PREFIX}_WEB_HOST", "0.0.0.0")
+WEB_PORT = env_int(f"{APP_ENV_PREFIX}_WEB_PORT", 8000)
+WEB_WATCH_INPUT = env_bool(f"{APP_ENV_PREFIX}_WEB_WATCH_INPUT", True)
+WEB_MAX_UPLOAD_MB = env_int(f"{APP_ENV_PREFIX}_WEB_MAX_UPLOAD_MB", 100)
+
+
 def configure_logging(name: str = "fuel_insight") -> logging.Logger:
     logger = logging.getLogger(name)
     if logger.handlers:
